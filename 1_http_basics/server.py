@@ -47,8 +47,9 @@ class SimpleHandler(BaseHTTPRequestHandler):
                     a = int(params["a"][0])
                     b = int(params["b"][0])
                 except (KeyError, ValueError):
-                    self.send_text(
-                        400, "Неверный запрос: a и b должны быть целыми числами."
+                    self.send_json(
+                        400,
+                        {"error": "Неверный запрос: a и b должны быть целыми числами."},
                     )
                     return
                 self.send_json(200, {"result": a + b})
@@ -62,7 +63,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
             try:
                 user_id = int(user_part)
             except ValueError:
-                self.send_json(400, {"Неверный запрос: user_id должен быть числом"})
+                self.send_json(400, {"error": "user_id должен быть числом"})
                 return
             self.send_json(200, {"user_id": user_id})
 
@@ -81,7 +82,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "Отсутствуют a и/или b"})
                 return
 
-        if parsed.path == "/devide":
+        if parsed.path == "/divide":
             if "a" in params and "b" in params:
                 try:
                     a = int(params["a"][0])
@@ -100,10 +101,10 @@ class SimpleHandler(BaseHTTPRequestHandler):
                 return
 
         if parsed.path == "/time":
-            self.send_text(200, f"time = {datetime.now().isoformat()}")
+            self.send_json(200, {"time": f"time = {datetime.now().isoformat()}"})
             return
 
-        self.send_text(400, f"Неизветсная команда {parsed.path}")
+        self.send_text(404, f"Неизветсная команда {parsed.path}")
 
 
 if __name__ == "__main__":
