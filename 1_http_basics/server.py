@@ -5,10 +5,11 @@ from datetime import datetime
 from enum import Enum
 
 
-class operator(Enum):
-    add = "/sum"
-    mul = "/mul"
-    pow = "/pow"
+class Operator(Enum):
+    add = "sum"
+    mul = "mul"
+    pow = "pow"
+    div = "div"
 
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -65,74 +66,63 @@ class SimpleHandler(BaseHTTPRequestHandler):
 
         return data, None, None
 
-    def extract_numbers(
-        self, data: dict[str, object]
-    ) -> tuple[int | float, int | float] | None:
-        a = data.get("a")
-        b = data.get("b")
-
-        if a is None or b is None:
-            self.send_json(
-                status=422, data={"error": "Параметры 'a' и 'b' обязательны"}
-            )
-            return None
-
-        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
-            self.send_json(
-                status=422, data={"error": "Параметры 'a' и 'b' должны быть числами"}
-            )
-            return None
-
-        return a, b
-
-    def handle_sum(self, data: dict[str, object]) -> None:
+    def calculate(self, data: dict) -> None:
         if (r := self.extract_numbers(data)) is None:
             return None
 
-        a, b = r
+        operation, a, b = r
+        try:
+            operator = Operator(operation)
+        except ValueError:
+            return self.send_json(
+                status=422,
+                data={"error": f"operator должен быть {[op.value for op in Operator]}"},
+            )
 
-        return self.send_json(status=200, data={"result": a + b})
+        match operator:
+            case Operator.add:
+                result = a + b
+            case Operator.mul:
+                result = a * b
+            case Operator.pow:
+                result = a**b
+            case Operator.div:
+                try:
+                    result = a / b
+                except ZeroDivisionError:
+                    return self.send_json(422, {"error": "'b' не должно быть нулём"})
+            case _:
+                return self.send_json(500, {"error": "Ошибка в программе"})
+
+        return self.send_json(200, {"result": result})
+
+    def extract_numbers(
+        self, data: dict[str, object]
+    ) -> tuple[str, int | float, int | float] | None:
+        a = data.get("a")
+        b = data.get("b")
+        operation = data.get("operation")
+
+        if a is None or b is None or operation is None:
+            return self.send_json(
+                status=422,
+                data={"error": "Параметры 'a', 'b' b 'operation' обязательны"},
+            )
+
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+            return self.send_json(
+                status=422, data={"error": "Параметры 'a' и 'b' должны быть числами"}
+            )
+
+        return operation, a, b
 
     def handle_echo(self, data: dict[str, object]) -> None:
         return self.send_json(200, {"received": data})
 
-    def handle_multiply(self, data: dict[str, object]) -> None:
-        if (r := self.extract_numbers(data)) is None:
-            return None
-
-        a, b = r
-        return self.send_json(status=200, data={"result": a * b})
-
-    def handle_divide(self, data: dict[str, object]) -> None:
-        if (r := self.extract_numbers(data)) is None:
-            return None
-
-        a, b = r
-
-        try:
-            result = a / b
-        except ZeroDivisionError:
-            return self.send_json(422, {"error": "'b' не должно быть нулём"})
-
-        return self.send_json(200, {"result": result})
-
-    def handle_power(self, data: dict[str, object]) -> None:
-        if (r := self.extract_numbers(data)) is None:
-            return None
-
-        a, b = r
-
-        result = a**b
-        return self.send_json(200, {"result": result})
-
-    def calculate(self, data: dict[str, object], operation) -> None:
-        math
-        a, b = self.extract_numbers(data)
-
     def send_method_not_allowed(
         self, allowed_methods: str, message: str = "Method is Not Allowed"
     ) -> None:
-        # allowed_methods: например "POST" или "GET, POST"
+        # allowed_methods.
         self.send_response(405)
         self.send_header("Allow", allowed_methods)
         self.send_header("Content-type", "application/json; charset=utf-8")
@@ -198,20 +188,8 @@ class SimpleHandler(BaseHTTPRequestHandler):
                 return self.send_json(status=status, data=err)
             return self.send_json(status=500, data={"error": "Ошибка в программе"})
 
-        if path == "/sum":
-            return self.handle_sum(data=data)
-
-        if path == "/echo":
-            return self.handle_echo(data=data)
-
-        if path == "/multiply":
-            return self.handle_multiply(data=data)
-
-        if path == "/divide":
-            return self.handle_divide(data=data)
-
-        if path == "/power":
-            return self.handle_power(data=data)
+        if path == "/operation":
+            return self.calculate(data)
 
         return self.send_json(404, {"error": f"Неизвестный endpoint: {path}"})
 
