@@ -1,9 +1,10 @@
 from typing import Iterable
 
-from framework.middleware import Middleware
-from framework.request import build_request
+from framework.types import Middleware
+from framework.wsgi_adapter import build_request
 from framework.response import json_response, Response, text_response
-from framework.router import Router, Handler
+from framework.router import Router
+from framework.types import Handler
 
 
 class App:

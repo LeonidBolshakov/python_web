@@ -1,11 +1,7 @@
 import re
 from dataclasses import dataclass
-from typing import Callable
 
-from framework.request import Request
-from framework.response import Response
-
-Handler = Callable[[Request], Response]
+from framework.types import Handler
 
 
 def compile_path(path: str) -> re.Pattern[str]:

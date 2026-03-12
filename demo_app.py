@@ -1,11 +1,18 @@
 import datetime as dt
 
 from framework.asgi_app import App
-from framework.middleware import logging_middleware, error_middleware
-from framework.request import Request
+from framework.middleware import (
+    logging_middleware,
+    error_middleware,
+    LoggingMiddleware,
+    ServerHeaderMiddleware,
+)
+from framework.types import Request
 from framework.response import json_response, text_response
 
 app = App()
+
+# handler middleware
 app.add_middleware(logging_middleware)
 app.add_middleware(error_middleware)
 
@@ -81,3 +88,39 @@ def ping(req):
         return {"method": "POST"}
 
     return {"error": "unkown method"}
+
+
+@app.get("/async")
+async def handle_async(req: Request):
+    return {"message": "async ok"}
+
+
+@app.post("/echo")
+def echo(request: Request):
+    return request.json()
+
+
+@app.post("/login")
+def login(request: Request):
+    form = request.form()
+
+    return {"username": form["username"][0]}
+
+
+@app.get("/ctype")
+def content_ctype(request: Request):
+    return {"content_type": request.header("content-type")}
+
+
+@app.post("/test")
+def test(request: Request):
+
+    a = request.json()
+    b = request.json()
+
+    return {"ok": True}
+
+
+# ASGI middleware
+app.add_asgi_middleware(LoggingMiddleware)
+app.add_asgi_middleware(ServerHeaderMiddleware)

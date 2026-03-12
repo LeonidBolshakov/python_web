@@ -1,108 +1,219 @@
+"""
+ASGI-приложение для нашего учебного фреймворка.
+"""
+
 import inspect
 import json
-from typing import Any, Awaitable, Callable, Dict, List, Tuple
+from urllib.parse import parse_qs
+from typing import Any
+from typing import Protocol
 
-from request import Request
-from response import Response
+from framework.router import Router
+from framework.response import Response
+from framework.types import (
+    Scope,
+    Send,
+    Receive,
+    Request,
+    Handler,
+    Middleware,
+    MiddlewareFactory,
+)
 
-
-class ASGIApp:
-    def __init__(self, router, middlewares=None):
-        self.router = router
-        self.middlewares = middlewares or []
-
+class ASGIApp(Protocol):
     async def __call__(
         self,
-        scope: Dict[str, Any],
-        receive: Callable[[], Awaitable[Dict[str, Any]]],
-        send: Callable[[Dict[str, Any]], Awaitable[None]],
-    ) -> None:
-        if not self._is_http_scope(scope):
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None: ...
+
+
+class App:
+    """
+    ASGI-приложение нашего учебного фреймворка.
+    """
+
+    def __init__(self) -> None:
+        self.router = Router()
+
+        # обычные middleware (handler level)
+        self.middlewares: list[Middleware] = []
+
+        # ASGI middleware
+        self.asgi_middlewares: list[MiddlewareFactory] = []
+
+        # кеш ASGI стека
+        self._asgi_stack: ASGIApp | None = None
+
+    # ---------------- ROUTES ----------------
+
+    def add_route(self, path: str, method: str, handler: Handler) -> None:
+        self.router.add(method, path, handler)
+
+    def route(self, path: str, methods: list[str] | None = None):
+        if methods is None:
+            methods = ["GET"]
+
+        def decorator(handler: Handler) -> Handler:
+            for method in methods:
+                self.add_route(path, method, handler)
+            return handler
+
+        return decorator
+
+    def get(self, path: str):
+        return self.route(path, ["GET"])
+
+    def post(self, path: str):
+        return self.route(path, ["POST"])
+
+    # ---------------- MIDDLEWARE ----------------
+
+    def add_middleware(self, middleware: Middleware) -> None:
+        self.middlewares.append(middleware)
+
+    def add_asgi_middleware(self, middleware: MiddlewareFactory) -> None:
+        self.asgi_middlewares.append(middleware)
+        self._asgi_stack = None
+
+    # ---------------- RESPONSE ----------------
+
+    def ensure_response(self, result: Any) -> Response:
+        if isinstance(result, Response):
+            return result
+
+        if isinstance(result, dict):
+            return Response(
+                body=json.dumps(result).encode(),
+                status=200,
+                headers=[(b"content-type", b"application/json")],
+            )
+
+        if isinstance(result, str):
+            return Response(
+                body=result.encode(),
+                status=200,
+                headers=[(b"content-type", b"text/plain")],
+            )
+
+        raise TypeError("Handler должен возвращать Response, dict или str")
+
+    # ---------------- HANDLER MIDDLEWARE CHAIN ----------------
+
+    def _build_chain(self, handler: Handler) -> Handler:
+
+        for mw in reversed(self.middlewares):
+            next_handler = handler
+
+            async def wrapper(request: Request, mw_=mw, nxt=next_handler):
+                result = mw_(request, nxt)
+
+                if inspect.isawaitable(result):
+                    result = await result
+
+                return result
+
+            handler = wrapper
+
+        return handler
+
+    # ---------------- ASGI STACK ----------------
+
+    def _build_asgi_stack(self) -> ASGIApp:
+
+        if self._asgi_stack is not None:
+            return self._asgi_stack
+
+        app: ASGIApp = self._asgi_app
+
+        for middleware in reversed(self.asgi_middlewares):
+            app = middleware(app)
+
+
+        self._asgi_stack = app
+        return app
+
+    # ---------------- ASGI ENTRYPOINT ----------------
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+
+        app = self._build_asgi_stack()
+        await app(scope, receive, send)
+
+    # ---------------- INTERNAL ASGI APP ----------------
+
+    async def _asgi_app(self, scope: Scope, receive: Receive, send: Send) -> None:
+
+        if scope.get("type") != "http":
             return
 
-        method, path, headers, query_string = self._extract_request_parts(scope)
-        body = await self._read_body(receive)
-        request = self._make_request(method, path, headers, body, query_string)
+        body = await self._receive_body(receive)
+        request = self._make_request(scope, body)
 
-        response = await self._dispatch_request(request)
+        response = await self._dispatch(request)
+
         await self._send_response(send, response)
 
-    def _is_http_scope(self, scope: Dict[str, Any]) -> bool:
-        return scope.get("type") == "http"
+    # ---------------- BODY ----------------
 
-    def _extract_request_parts(
-        self, scope: Dict[str, Any]
-    ) -> Tuple[str, str, List[Tuple[bytes, bytes]], bytes]:
-        method: str = scope.get("method", "GET")
-        path: str = scope.get("path", "/")
-        headers = scope.get("headers", [])
-        query_string: bytes = scope.get("query_string", b"")
-        return method, path, headers, query_string
+    async def _receive_body(self, receive: Receive) -> bytes:
 
-    async def _read_body(
-        self,
-        receive: Callable[[], Awaitable[Dict[str, Any]]],
-    ) -> bytes:
         body = b""
-
         while True:
             event = await receive()
-            event_type = event.get("type")
-
-            if event_type == "http.disconnect":
-                break
-
-            if event_type != "http.request":
-                continue
-
-            body += event.get("body", b"")
-
-            if not event.get("more_body", False):
-                break
-
+            if event["type"] == "http.request":
+                body += event.get("body", b"")
+                if not event.get("more_body", False):
+                    break
         return body
 
-    def _make_request(
-        self,
-        method: str,
-        path: str,
-        headers: List[Tuple[bytes, bytes]],
-        body: bytes,
-        query_string: bytes,
-    ) -> Request:
+    # ---------------- REQUEST ----------------
+
+    def _make_request(self, scope: Scope, body: bytes) -> Request:
+
+        method = scope.get("method", "GET")
+        path = scope.get("path", "/")
+
+        headers = scope.get("headers", [])
+
+        raw_qs = scope.get("query_string", b"")
+
+        query_params = parse_qs(raw_qs.decode("latin-1")) if raw_qs else {}
+
         return Request(
             method=method,
             path=path,
             headers=headers,
             body=body,
-            query=query_string,
+            query=query_params,
         )
 
-    async def _dispatch_request(self, request: Request) -> Response:
+    # ---------------- DISPATCH ----------------
+
+    async def _dispatch(self, request: Request) -> Response:
         resolved = self.router.resolve(request.method, request.path)
 
         if resolved is None:
-            return self._make_error_response(request.path)
+            return self._make_routing_error_response(request.path)
 
         handler, path_params = resolved
         request.path_params = path_params
 
         app_handler = self._build_chain(handler)
-        result = app_handler(request)
-
-        if inspect.isawaitable(result):
-            result = await result
+        result = await self._call_handler(app_handler, request)
 
         return self.ensure_response(result)
 
-    def _make_error_response(self, path: str) -> Response:
+    def _make_routing_error_response(self, path: str) -> Response:
         allowed = self.router.allowed_methods(path)
 
         if allowed:
             allowed_str = ", ".join(allowed)
-            payload = {"error": f"{path} supports only: {allowed_str}"}
             return Response(
-                body=json.dumps(payload).encode("utf-8"),
+                body=json.dumps(
+                    {"error": f"{path} supports only: {allowed_str}"}
+                ).encode(),
                 status=405,
                 headers=[
                     (b"Allow", allowed_str.encode()),
@@ -110,54 +221,38 @@ class ASGIApp:
                 ],
             )
 
-        payload = {"error": f'Unknown path "{path}"'}
         return Response(
-            body=json.dumps(payload).encode("utf-8"),
+            body=json.dumps({"error": f'Unknown path "{path}"'}).encode(),
             status=404,
             headers=[(b"content-type", b"application/json")],
         )
 
-    async def _send_response(
-        self,
-        send: Callable[[Dict[str, Any]], Awaitable[None]],
-        response: Response,
-    ) -> None:
-        response = response.with_default_headers()
+    async def _call_handler(self, handler, request: Request) -> Any:
+        result = handler(request)
+
+        if inspect.isawaitable(result):
+            result = await result
+
+        return result
+
+
+    # ---------------- SEND RESPONSE ----------------
+
+    async def _send_response(self, send: Send, response: Response) -> None:
+
+        resp = response.with_default_headers()
 
         await send(
             {
                 "type": "http.response.start",
-                "status": response.status,
-                "headers": response.headers,
+                "status": resp.status,
+                "headers": resp.headers,
             }
         )
+
         await send(
             {
                 "type": "http.response.body",
-                "body": response.body,
+                "body": resp.body,
             }
         )
-
-    def _build_chain(self, handler):
-        app_handler = handler
-        for middleware in reversed(self.middlewares):
-            app_handler = middleware(app_handler)
-        return app_handler
-
-    def ensure_response(self, result) -> Response:
-        if isinstance(result, Response):
-            return result
-
-        if isinstance(result, bytes):
-            return Response(body=result)
-
-        if isinstance(result, str):
-            return Response(body=result.encode("utf-8"))
-
-        if isinstance(result, dict):
-            return Response(
-                body=json.dumps(result).encode("utf-8"),
-                headers=[(b"content-type", b"application/json")],
-            )
-
-        return Response(body=str(result).encode("utf-8"))
