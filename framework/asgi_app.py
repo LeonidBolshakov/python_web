@@ -182,7 +182,10 @@ class App:
             return await self._call_handler(handler, req)
 
         app_handler = self._build_chain(endpoint)
-        result = await app_handler(request)
+        result = app_handler(request)
+
+        if inspect.isawaitable(result):
+            result = await result
 
         return ensure_response(result)
 
@@ -231,11 +234,13 @@ class App:
                 continue
 
             value = request.query_param(name)
+            print(value)
             if value is not None:
                 kwargs[name] = value
+                continue
 
             if param.default is inspect._empty:
-                raise BadRequest(f"Отсутствует обязательный параметр: {name}")
+                raise BadRequest(f"Отсутствует обязательный параметр: '{name}'")
 
         return kwargs
 

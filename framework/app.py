@@ -64,7 +64,7 @@ class App:
             if allowed:
                 resp = json_response(
                     {"error": f'{req.path} supports only: {", ".join(allowed)}'},
-                    status="405 Method Not Allowed",
+                    status="405 Method is Not Allowed",
                     headers=[("Allow", ", ".join(allowed))],
                 )
             else:

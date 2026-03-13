@@ -33,13 +33,12 @@ def handle_time(req: Request):
 
 @app.get("/hello")
 def handle_hello(name: str = "Мир"):
-    # name = (req.query.get("name") or ["world"])[0]
     return json_response({"message": f"Hello, {name}!"})
 
 
 @app.get("/users/<user_id>")
-def handle_user(req: Request):
-    user_id = req.path_params["user_id"]
+def handle_user(user_id: str):
+    # user_id = req.path_params["user_id"]
     return json_response({"user_id": user_id})
 
 
@@ -112,13 +111,13 @@ def content_ctype(request: Request):
     return {"content_type": request.header("content-type")}
 
 
-@app.post("/test")
-def test(request: Request):
-
-    a = request.json()
-    b = request.json()
-
-    return {"ok": True}
+@app.get("/test")
+def test(a: str, b: str = "B", request: Request | None = None):
+    return {
+        "a": a,
+        "b": b,
+        "request_type": type(request).__name__,
+    }
 
 
 # ASGI middleware

@@ -19,6 +19,6 @@ Send = Callable[[Message], Awaitable[None]]
 # ---- Framework типы ----
 
 HandlerResult: TypeAlias = Response | Awaitable[Response]
-Handler: TypeAlias = Callable[[Request], HandlerResult]
+Handler: TypeAlias = Callable[..., HandlerResult]
 Middleware: TypeAlias = Callable[[Request, Handler], HandlerResult]
 MiddlewareFactory = Callable[["ASGIApp"], "ASGIApp"]
