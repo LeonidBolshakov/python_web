@@ -1,5 +1,7 @@
-from request import Request
 from urllib.parse import parse_qs
+
+from request import Request
+
 
 def _get_headers(environ: dict) -> dict[str, str]:
     headers: dict[str, str] = {}

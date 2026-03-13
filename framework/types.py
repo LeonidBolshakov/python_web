@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, TypeAlias, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeAlias
 
-from framework.response import Response
 from framework.request import Request
+from framework.response import Response
+
 if TYPE_CHECKING:
-    from framework.asgi_app import ASGIApp # noqa: F401
+    from framework.asgi_app import ASGIApp  # noqa: F401
 
 # ---- ASGI типы ----
 

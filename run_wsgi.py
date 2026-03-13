@@ -1,4 +1,5 @@
 from wsgiref.simple_server import make_server
+
 from demo_app import app
 
 if __name__ == "__main__":

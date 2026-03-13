@@ -4,21 +4,22 @@ ASGI-приложение для нашего учебного фреймвор�
 
 import inspect
 import json
+from typing import Any, Protocol
 from urllib.parse import parse_qs
-from typing import Any
-from typing import Protocol
 
+from framework.response import Response, ensure_response
 from framework.router import Router
-from framework.response import Response
+from framework.exceptions import BadRequest
 from framework.types import (
-    Scope,
-    Send,
-    Receive,
-    Request,
     Handler,
     Middleware,
     MiddlewareFactory,
+    Receive,
+    Request,
+    Scope,
+    Send,
 )
+
 
 class ASGIApp(Protocol):
     async def __call__(
@@ -77,28 +78,6 @@ class App:
         self.asgi_middlewares.append(middleware)
         self._asgi_stack = None
 
-    # ---------------- RESPONSE ----------------
-
-    def ensure_response(self, result: Any) -> Response:
-        if isinstance(result, Response):
-            return result
-
-        if isinstance(result, dict):
-            return Response(
-                body=json.dumps(result).encode(),
-                status=200,
-                headers=[(b"content-type", b"application/json")],
-            )
-
-        if isinstance(result, str):
-            return Response(
-                body=result.encode(),
-                status=200,
-                headers=[(b"content-type", b"text/plain")],
-            )
-
-        raise TypeError("Handler должен возвращать Response, dict или str")
-
     # ---------------- HANDLER MIDDLEWARE CHAIN ----------------
 
     def _build_chain(self, handler: Handler) -> Handler:
@@ -129,7 +108,6 @@ class App:
 
         for middleware in reversed(self.asgi_middlewares):
             app = middleware(app)
-
 
         self._asgi_stack = app
         return app
@@ -200,10 +178,13 @@ class App:
         handler, path_params = resolved
         request.path_params = path_params
 
-        app_handler = self._build_chain(handler)
-        result = await self._call_handler(app_handler, request)
+        async def endpoint(req: Request) -> Any:
+            return await self._call_handler(handler, req)
 
-        return self.ensure_response(result)
+        app_handler = self._build_chain(endpoint)
+        result = await app_handler(request)
+
+        return ensure_response(result)
 
     def _make_routing_error_response(self, path: str) -> Response:
         allowed = self.router.allowed_methods(path)
@@ -227,14 +208,36 @@ class App:
             headers=[(b"content-type", b"application/json")],
         )
 
-    async def _call_handler(self, handler, request: Request) -> Any:
-        result = handler(request)
+    async def _call_handler(self, handler: Handler, request: Request) -> Any:
+        kwargs = self._build_kwargs(handler, request)
+        result = handler(**kwargs)
 
         if inspect.isawaitable(result):
             result = await result
 
         return result
 
+    def _build_kwargs(self, handler: Handler, request: Request) -> dict[str, Any]:
+        sig = inspect.signature(handler)
+        kwargs: dict[str, Any] = {}
+
+        for name, param in sig.parameters.items():
+            if param.annotation is Request or name == "request":
+                kwargs[name] = request
+                continue
+
+            if name in request.path_params:
+                kwargs[name] = request.path_params[name]
+                continue
+
+            value = request.query_param(name)
+            if value is not None:
+                kwargs[name] = value
+
+            if param.default is inspect._empty:
+                raise BadRequest(f"Отсутствует обязательный параметр: {name}")
+
+        return kwargs
 
     # ---------------- SEND RESPONSE ----------------
 

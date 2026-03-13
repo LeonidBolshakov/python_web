@@ -246,8 +246,6 @@ class App:
                 status="500 Internal Server Error",
             )
 
-        return response
-
     # ---- WSGI entrypoint ----
 
     def __call__(self, environ: dict, start_response) -> Iterable[bytes]:

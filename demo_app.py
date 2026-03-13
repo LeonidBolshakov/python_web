@@ -2,13 +2,13 @@ import datetime as dt
 
 from framework.asgi_app import App
 from framework.middleware import (
-    logging_middleware,
-    error_middleware,
     LoggingMiddleware,
     ServerHeaderMiddleware,
+    error_middleware,
+    logging_middleware,
 )
-from framework.types import Request
 from framework.response import json_response, text_response
+from framework.types import Request
 
 app = App()
 
@@ -32,8 +32,8 @@ def handle_time(req: Request):
 
 
 @app.get("/hello")
-def handle_hello(req: Request):
-    name = (req.query.get("name") or ["world"])[0]
+def handle_hello(name: str = "Мир"):
+    # name = (req.query.get("name") or ["world"])[0]
     return json_response({"message": f"Hello, {name}!"})
 
 

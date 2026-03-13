@@ -1,6 +1,7 @@
 import json
-from typing import Any
 from dataclasses import dataclass, field
+from typing import Any
+
 
 @dataclass(frozen=True)
 class Response:
@@ -119,3 +120,34 @@ def text_response(
             value_b = value if isinstance(value, bytes) else str(value).encode()
             result_headers.append((name_b, value_b))
     return Response(status=status_code, headers=result_headers, body=payload)
+
+
+def ensure_response(result) -> Response:
+    if isinstance(result, Response):
+        return result
+
+    if isinstance(result, (dict, list)):
+        body = json.dumps(result).encode("utf-8")
+
+        return Response(
+            body=body,
+            headers=[
+                (b"content-type", b"application/json"),
+            ],
+        )
+
+    if isinstance(result, str):
+        return Response(
+            body=result.encode("utf-8"),
+            headers=[
+                (b"content-type", b"text/plain; charset=utf-8"),
+            ],
+        )
+
+    if isinstance(result, bytes):
+        return Response(body=result)
+
+    if result is None:
+        return Response(body=b"")
+
+    raise TypeError(f"Unsupported response type: {type(result)}")
