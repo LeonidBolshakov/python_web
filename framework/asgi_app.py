@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 from framework.response import Response, ensure_response
 from framework.router import Router
 from framework.exceptions import BadRequest
+from framework.depends import Depends
 from framework.types import (
     Handler,
     Middleware,
@@ -212,7 +213,7 @@ class App:
         )
 
     async def _call_handler(self, handler: Handler, request: Request) -> Any:
-        kwargs = self._build_kwargs(handler, request)
+        kwargs = await self._build_kwargs(handler, request)
         result = handler(**kwargs)
 
         if inspect.isawaitable(result):
@@ -220,7 +221,7 @@ class App:
 
         return result
 
-    def _build_kwargs(self, handler: Handler, request: Request) -> dict[str, Any]:
+    async def _build_kwargs(self, handler: Handler, request: Request) -> dict[str, Any]:
         sig = inspect.signature(handler)
         kwargs: dict[str, Any] = {}
 
@@ -230,19 +231,93 @@ class App:
                 continue
 
             if name in request.path_params:
-                kwargs[name] = request.path_params[name]
+                raw_value = request.path_params[name]
+                try:
+                    kwargs[name] = self._convert_type(raw_value, param.annotation)
+                except (ValueError, TypeError):
+                    raise BadRequest(
+                        f"Некорректное значение path-параметра '{name}': {raw_value!r}"
+                    )
                 continue
 
-            value = request.query_param(name)
-            print(value)
-            if value is not None:
+            raw_value = request.query_param(name)
+            if raw_value is not None:
+                try:
+                    kwargs[name] = self._convert_type(raw_value, param.annotation)
+                except (ValueError, TypeError):
+                    raise BadRequest(
+                        f"Некорректное значение query-параметра '{name}': {raw_value!r}"
+                    )
+                continue
+
+            body = request.json()
+            if isinstance(body, dict) and name in body:
+                raw_value = body[name]
+                try:
+                    kwargs[name] = self._convert_type(raw_value, param.annotation)
+                except (ValueError, TypeError):
+                    raise BadRequest(
+                        f"Некорректное значение body-параметра '{name}': {raw_value!r}"
+                    )
+                continue
+
+            if isinstance(param.default, Depends):
+                dep = param.default.dependency
+
+                value = await self._resolve_dependency(dep, request)
+
                 kwargs[name] = value
                 continue
 
-            if param.default is inspect._empty:
-                raise BadRequest(f"Отсутствует обязательный параметр: '{name}'")
+            if param.default is not inspect._empty:
+                kwargs[name] = param.default
+                continue
+
+            raise BadRequest(f"Отсутствует обязательный параметр: '{name}'")
 
         return kwargs
+
+    async def _resolve_dependency(self, dep, request: Request):
+        kwargs = await self._build_kwargs(dep, request)
+        value = dep(**kwargs)
+
+        if inspect.isawaitable(value):
+            value = await value
+
+        return value
+
+    def _convert_type(self, value: Any, annotation: Any) -> Any:
+        if annotation is inspect._empty or annotation is Any:
+            return value
+
+        if annotation is str:
+            return str(value)
+
+        if annotation is int:
+            return int(value)
+
+        if annotation is float:
+            return float(value)
+
+        if annotation is bool:
+            if isinstance(value, bool):
+                return value
+
+            text = str(value).strip().lower()
+
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+
+            raise ValueError(f"Некорректное bool-значение: {value!r}")
+
+        if annotation is bytes:
+            if isinstance(value, bytes):
+                return value
+            return str(value).encode("utf-8")
+
+        return value
 
     # ---------------- SEND RESPONSE ----------------
 

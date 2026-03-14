@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # import sorting
+]
+
+ignore = [
+    "E501"
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

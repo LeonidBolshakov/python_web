@@ -1,5 +1,7 @@
 import datetime as dt
+import random
 
+from framework.depends import Depends
 from framework.asgi_app import App
 from framework.middleware import (
     LoggingMiddleware,
@@ -9,6 +11,23 @@ from framework.middleware import (
 )
 from framework.response import json_response, text_response
 from framework.types import Request
+
+
+def get_number():
+    return 5
+
+
+def get_random():
+    return random.randint(1, 100)
+
+
+def get_db():
+    return "db"
+
+
+def get_user(db=Depends(get_db)):
+    return f"user_from_{db}"
+
 
 app = App()
 
@@ -37,7 +56,7 @@ def handle_hello(name: str = "Мир"):
 
 
 @app.get("/users/<user_id>")
-def handle_user(user_id: str):
+def handle_user(user_id: int):
     # user_id = req.path_params["user_id"]
     return json_response({"user_id": user_id})
 
@@ -118,6 +137,36 @@ def test(a: str, b: str = "B", request: Request | None = None):
         "b": b,
         "request_type": type(request).__name__,
     }
+
+
+@app.post("/sum")
+def handle_sum(a: int, b: int) -> int:
+    return {"result": a + b}
+
+
+@app.get("/square")
+def square(x: int):
+    return {"result": x * x}
+
+
+@app.get("/flag")
+def flag(enabled: bool = False):
+    return {"enabled": enabled}
+
+
+@app.get("/dep")
+def dep_test(x: int, num=Depends(get_number)):
+    return {"x": x + num}
+
+
+@app.get("/random")
+def random_test(x: int = Depends(get_random)):
+    return {"x": x}
+
+
+@app.get("/test2")
+def handler_test2(user=Depends(get_user)):
+    return {"user": user}
 
 
 # ASGI middleware
