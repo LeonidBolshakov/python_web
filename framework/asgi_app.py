@@ -4,8 +4,9 @@ ASGI-приложение для нашего учебного фреймвор�
 
 import inspect
 import json
-from typing import Any, Protocol
+from typing import Any, Protocol, Iterator
 from urllib.parse import parse_qs
+from pydantic import BaseModel, ValidationError
 
 from framework.response import Response, ensure_response
 from framework.router import Router
@@ -213,17 +214,39 @@ class App:
         )
 
     async def _call_handler(self, handler: Handler, request: Request) -> Any:
-        kwargs = await self._build_kwargs(handler, request)
+        dependency_cache: dict[Any, Any] = {}
+        cleanup: list[Iterator[Any]] = []
+
+        kwargs = await self._build_kwargs(
+            handler,
+            request,
+            dependency_cache,
+            cleanup,
+        )
         result = handler(**kwargs)
 
         if inspect.isawaitable(result):
             result = await result
 
+        for gen in reversed(cleanup):
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
         return result
 
-    async def _build_kwargs(self, handler: Handler, request: Request) -> dict[str, Any]:
+    async def _build_kwargs(
+        self,
+        handler: Handler,
+        request: Request,
+        dependency_cache: dict[Any, Any],
+        cleanup: list[Iterator[Any]],
+    ) -> dict[str, Any]:
         sig = inspect.signature(handler)
         kwargs: dict[str, Any] = {}
+
+        body = request.json()
 
         for name, param in sig.parameters.items():
             if param.annotation is Request or name == "request":
@@ -250,7 +273,15 @@ class App:
                     )
                 continue
 
-            body = request.json()
+            if self._is_pyadantic_model(param.annotation):
+                if not isinstance(body, dict):
+                    raise BadRequest(f"Ожидался JSON-объект {body}")
+                try:
+                    kwargs[name] = param.annotation.model_validate(body)
+                except ValidationError as e:
+                    raise BadRequest(str(e))
+                continue
+
             if isinstance(body, dict) and name in body:
                 raw_value = body[name]
                 try:
@@ -264,7 +295,9 @@ class App:
             if isinstance(param.default, Depends):
                 dep = param.default.dependency
 
-                value = await self._resolve_dependency(dep, request)
+                value = await self._resolve_dependency(
+                    dep, request, dependency_cache, cleanup
+                )
 
                 kwargs[name] = value
                 continue
@@ -277,14 +310,32 @@ class App:
 
         return kwargs
 
-    async def _resolve_dependency(self, dep, request: Request):
-        kwargs = await self._build_kwargs(dep, request)
-        value = dep(**kwargs)
+    async def _resolve_dependency(
+        self,
+        dep,
+        request: Request,
+        dependency_cache: dict[Any, Any],
+        cleanup: list[Iterator[Any]],
+    ) -> Any:
+        if dep in dependency_cache:
+            return dependency_cache[dep]
 
-        if inspect.isawaitable(value):
-            value = await value
+        kwargs = await self._build_kwargs(dep, request, dependency_cache, cleanup)
 
+        if inspect.isgeneratorfunction(dep):
+            generator = dep(**kwargs)
+            value = next(generator)
+            cleanup.append(generator)
+        else:
+            value = dep(**kwargs)
+            if inspect.isawaitable(value):
+                value = await value
+
+        dependency_cache[dep] = value
         return value
+
+    def _is_pyadantic_model(self, annotation: Any) -> bool:
+        return inspect.isclass(annotation) and issubclass(annotation, BaseModel)
 
     def _convert_type(self, value: Any, annotation: Any) -> Any:
         if annotation is inspect._empty or annotation is Any:

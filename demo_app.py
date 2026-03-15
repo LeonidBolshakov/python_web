@@ -1,5 +1,8 @@
 import datetime as dt
 import random
+from typing import Literal
+
+from pydantic import BaseModel
 
 from framework.depends import Depends
 from framework.asgi_app import App
@@ -22,11 +25,22 @@ def get_random():
 
 
 def get_db():
+    print("Вызов get_db")
     return "db"
 
 
 def get_user(db=Depends(get_db)):
     return f"user_from_{db}"
+
+
+def get_settings(db=Depends(get_db)):
+    return f"settings_from_{db}"
+
+
+class PydantOp(BaseModel):
+    op: Literal["+", "-", "*", "/"]
+    a: int | float
+    b: int | float
 
 
 app = App()
@@ -167,6 +181,18 @@ def random_test(x: int = Depends(get_random)):
 @app.get("/test2")
 def handler_test2(user=Depends(get_user)):
     return {"user": user}
+
+
+@app.get("/cache-test")
+def cash_test(user=Depends(get_user), settings=Depends(get_settings)):
+    return {"user": user, "setting": settings}
+
+
+@app.post("/pydantic")
+def pydantic_test(data: PydantOp):
+    if data.op == "+":
+        return {"result": data.a + data.b}
+    return {"error": f"Для операции '{data.op}' программа разрабатывается"}
 
 
 # ASGI middleware
