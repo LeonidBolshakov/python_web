@@ -175,7 +175,9 @@ async def test_repo_call():
     assert log == [
         "pool open",
         "acquire:0",
+        "Begin:0",
         "repo: 42",
+        "Commit:0",
         "handler",
         "release:0",
         "pool close",
@@ -346,6 +348,3 @@ async def test_transaction_rollback():
         "release:0",
         "pool close",
     ]
-
-
-
