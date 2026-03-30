@@ -7,8 +7,6 @@ from pydantic import BaseModel
 from framework.depends import Depends
 from framework.asgi_app import App
 from framework.middleware import (
-    LoggingMiddleware,
-    ServerHeaderMiddleware,
     error_middleware,
     logging_middleware,
 )
@@ -195,6 +193,9 @@ def pydantic_test(data: PydantOp):
     return {"error": f"Для операции '{data.op}' программа разрабатывается"}
 
 
-# ASGI middleware
-app.add_asgi_middleware(LoggingMiddleware)
-app.add_asgi_middleware(ServerHeaderMiddleware)
+def dep():
+    print("open")
+    try:
+        yield "value"
+    finally:
+        print("close")

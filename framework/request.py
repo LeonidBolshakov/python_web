@@ -13,6 +13,7 @@ class Request:
     query: dict[str, list[str]]
     headers: list[tuple[bytes, bytes]]
     body: bytes
+    app: Any | None = None
     path_params: dict[str, str] = field(default_factory=dict)
     _json_cache: Any = field(default=None, init=False, repr=False)
 

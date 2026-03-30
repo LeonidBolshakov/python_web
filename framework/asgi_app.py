@@ -4,9 +4,10 @@ ASGI-приложение для нашего учебного фреймвор�
 
 import inspect
 import json
-from typing import Any, Protocol, Iterator
+from typing import Any, Protocol, Iterator, AsyncIterator
 from urllib.parse import parse_qs
 from pydantic import BaseModel, ValidationError
+from contextlib import AsyncExitStack
 
 from framework.response import Response, ensure_response
 from framework.router import Router
@@ -32,6 +33,10 @@ class ASGIApp(Protocol):
     ) -> None: ...
 
 
+class State:
+    pass
+
+
 class App:
     """
     ASGI-приложение нашего учебного фреймворка.
@@ -39,6 +44,7 @@ class App:
 
     def __init__(self) -> None:
         self.router = Router()
+        self.state = State()
 
         # обычные middleware (handler level)
         self.middlewares: list[Middleware] = []
@@ -166,6 +172,7 @@ class App:
             path=path,
             headers=headers,
             body=body,
+            app=self,
             query=query_params,
         )
 
@@ -213,26 +220,23 @@ class App:
             headers=[(b"content-type", b"application/json")],
         )
 
-    async def _call_handler(self, handler: Handler, request: Request) -> Any:
+    async def _call_handler(self, handler: Handler, request: Request):
         dependency_cache: dict[Any, Any] = {}
-        cleanup: list[Iterator[Any]] = []
 
-        kwargs = await self._build_kwargs(
-            handler,
-            request,
-            dependency_cache,
-            cleanup,
-        )
-        result = handler(**kwargs)
+        # noinspection PyAbstractClass
+        async with AsyncExitStack() as cleanup:
+            kwargs = await self._build_kwargs(
+                handler,
+                request,
+                dependency_cache,
+                cleanup,
+            )
 
-        if inspect.isawaitable(result):
-            result = await result
+            result = handler(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
 
-        for gen in reversed(cleanup):
-            try:
-                next(gen)
-            except StopIteration:
-                pass
+            return result
 
         return result
 
@@ -241,7 +245,7 @@ class App:
         handler: Handler,
         request: Request,
         dependency_cache: dict[Any, Any],
-        cleanup: list[Iterator[Any]],
+        cleanup: AsyncExitStack,
     ) -> dict[str, Any]:
         sig = inspect.signature(handler)
         kwargs: dict[str, Any] = {}
@@ -275,7 +279,7 @@ class App:
 
             if self._is_pyadantic_model(param.annotation):
                 if not isinstance(body, dict):
-                    raise BadRequest(f"Ожидался JSON-объект {body}")
+                    raise BadRequest(f"Ожидался JSON-объект, получено: {body!r}")
                 try:
                     kwargs[name] = param.annotation.model_validate(body)
                 except ValidationError as e:
@@ -294,12 +298,9 @@ class App:
 
             if isinstance(param.default, Depends):
                 dep = param.default.dependency
-
-                value = await self._resolve_dependency(
+                kwargs[name] = await self._resolve_dependency(
                     dep, request, dependency_cache, cleanup
                 )
-
-                kwargs[name] = value
                 continue
 
             if param.default is not inspect._empty:
@@ -315,17 +316,19 @@ class App:
         dep,
         request: Request,
         dependency_cache: dict[Any, Any],
-        cleanup: list[Iterator[Any]],
+        cleanup: AsyncExitStack,
     ) -> Any:
         if dep in dependency_cache:
             return dependency_cache[dep]
 
         kwargs = await self._build_kwargs(dep, request, dependency_cache, cleanup)
 
-        if inspect.isgeneratorfunction(dep):
-            generator = dep(**kwargs)
-            value = next(generator)
-            cleanup.append(generator)
+        if inspect.isasyncgenfunction(dep):
+            value = await self._resolve_async_yield_dependency(dep, kwargs, cleanup)
+
+        elif inspect.isgeneratorfunction(dep):
+            value = self._resolve_sync_yield_dependency(dep, kwargs, cleanup)
+
         else:
             value = dep(**kwargs)
             if inspect.isawaitable(value):
@@ -369,6 +372,66 @@ class App:
             return str(value).encode("utf-8")
 
         return value
+
+    def _resolve_sync_yield_dependency(
+        self,
+        dep,
+        kwargs: dict[str, Any],
+        cleanup: AsyncExitStack,
+    ) -> Any:
+        generator = dep(**kwargs)
+
+        try:
+            value = next(generator)
+        except StopIteration:
+            raise RuntimeError(
+                f"Yield dependency '{dep.__name__}' завершилась без yield"
+            )
+
+        cleanup.callback(self._cleanup_sync_generator, generator, dep)
+        return value
+
+    def _cleanup_sync_generator(self, generator: Iterator[Any], dep) -> None:
+        try:
+            next(generator)
+        except StopIteration:
+            return
+        else:
+            raise RuntimeError(
+                f"Yield dependency '{dep.__name__}' должна делать ровно один yield"
+            )
+
+    async def _resolve_async_yield_dependency(
+        self,
+        dep,
+        kwargs: dict[str, Any],
+        cleanup: AsyncExitStack,
+    ) -> Any:
+        generator = dep(**kwargs)
+
+        try:
+            value = await anext(generator)
+        except StopAsyncIteration:
+            raise RuntimeError(
+                f"Async yield dependency '{dep.__name__}' завершилась без yield"
+            )
+
+        cleanup.push_async_callback(self._cleanup_async_generator, generator, dep)
+        return value
+
+    async def _cleanup_async_generator(
+        self,
+        generator: AsyncIterator[Any],
+        dep,
+    ) -> None:
+        try:
+            await anext(generator)
+        except StopAsyncIteration:
+            return
+        else:
+            raise RuntimeError(
+                f"Async yield dependency '{dep.__name__}' должна делать ровно один yield"
+            )
 
     # ---------------- SEND RESPONSE ----------------
 
