@@ -6,8 +6,9 @@ import inspect
 import json
 from typing import Any, Protocol, Iterator, AsyncIterator
 from urllib.parse import parse_qs
+
 from pydantic import BaseModel, ValidationError
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from framework.response import Response, ensure_response
 from framework.router import Router
@@ -22,6 +23,35 @@ from framework.types import (
     Scope,
     Send,
 )
+
+
+class Connection:
+    def __init__(self, ident: int, log: list[str]):
+        self.ident = ident
+        self.log = log
+
+    def __repr__(self) -> str:
+        return f"<Connection({self.ident})>"
+
+    async def begin(self):
+        self.log.append(f"Begin:{self.ident}")
+
+    async def commit(self):
+        self.log.append(f"Commit:{self.ident}")
+
+    async def rollback(self):
+        self.log.append(f"Rollback:{self.ident}")
+
+    @asynccontextmanager
+    async def transaction(self):
+        await self.begin()
+        try:
+            yield self
+        except Exception:
+            await self.rollback()
+            raise
+        else:
+            await self.commit()
 
 
 class ASGIApp(Protocol):
@@ -178,6 +208,23 @@ class App:
 
     # ---------------- DISPATCH ----------------
 
+    async def _call_with_uow(
+        self, handler: Handler, kwargs: dict, dependency_cache: dict[Any, Any]
+    ) -> Any:
+        conn = self._extract_connection(dependency_cache)
+
+        if conn is None:
+            return await self._invoke_handler(handler, kwargs)
+
+        async with conn.transaction():
+            return await self._invoke_handler(handler, kwargs)
+
+    async def _invoke_handler(self, handler: Handler, kwargs: dict[str, Any]) -> Any:
+        result = handler(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     async def _dispatch(self, request: Request) -> Response:
         resolved = self.router.resolve(request.method, request.path)
 
@@ -232,11 +279,7 @@ class App:
                 cleanup,
             )
 
-            result = handler(**kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-
-            return result
+            result = await self._call_with_uow(handler, kwargs, dependency_cache)
 
         return result
 
@@ -310,6 +353,15 @@ class App:
             raise BadRequest(f"Отсутствует обязательный параметр: '{name}'")
 
         return kwargs
+
+    def _extract_connection(
+        self, dependency_cache: dict[Any, Any]
+    ) -> Connection | None:
+        for value in dependency_cache.values():
+            if isinstance(value, Connection):
+                return value
+
+        return None
 
     async def _resolve_dependency(
         self,

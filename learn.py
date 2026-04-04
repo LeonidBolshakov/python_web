@@ -2,38 +2,15 @@ import pytest
 import asyncio
 from contextlib import asynccontextmanager
 
-from framework.asgi_app import App
+from framework.asgi_app import App, Connection
 from framework.depends import Depends
 from framework.types import Request
 
 
-class Connection:
-    def __init__(self, ident: int, log: list[str]):
-        self.ident = ident
-        self.log = log
-
-    def __repr__(self) -> str:
-        return f"<Connection({self.ident})>"
-
-    async def begin(self):
-        self.log.append(f"Begin:{self.ident}")
-
-    async def commit(self):
-        self.log.append(f"Commit:{self.ident}")
-
-    async def rollback(self):
-        self.log.append(f"Rollback:{self.ident}")
-
-    @asynccontextmanager
-    async def transaction(self):
-        await self.begin()
-        try:
-            yield self
-        except Exception:
-            await self.rollback()
-            raise
-        else:
-            await self.commit()
+class UnitOfWork:
+    def __init__(self, conn: Connection):
+        self.conn = conn
+        self.users = UserRepo(self)
 
 
 class AsyncConnectionPool:
@@ -91,13 +68,12 @@ class DummyRequest:
 
 
 class UserRepo:
-    def __init__(self, conn: Connection):
-        self.conn = conn
+    def __init__(self, uow: UnitOfWork):
+        self.uow = uow
 
     async def get_user(self, user_id: int) -> dict[str, int]:
-        async with self.conn.transaction() as conn:
-            self.conn.log.append(f"repo: {user_id}")
-            return {"id": user_id}
+        self.uow.conn.log.append(f"repo: {user_id}")
+        return {"id": user_id}
 
 
 def make_env():
@@ -117,10 +93,15 @@ def make_env():
         finally:
             await app_pool.release(conn)
 
-    async def get_repo(db=Depends(get_db)):
-        return UserRepo(db)
+    async def get_uow(db=Depends(get_db)):
+        return UnitOfWork(db)
 
-    return app, req, log, pool, get_db, get_repo
+    async def get_repo(uow=Depends(get_uow)):
+        return uow.users
+
+    get_db.__uov_provider__ = True
+
+    return app, req, log, pool, get_db, get_uow, get_repo
 
 
 @asynccontextmanager
@@ -135,12 +116,12 @@ async def lifespan(app: App, pool: AsyncConnectionPool):
 
 @pytest.mark.asyncio
 async def test_repo_lifecycle():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     @app.get("/h1")
     def handler(repo=Depends(get_repo)):
-        repo.conn.log.append("handler")
+        repo.uow.conn.log.append("handler")
         return "Ok"
 
     try:
@@ -151,7 +132,9 @@ async def test_repo_lifecycle():
     assert log == [
         "pool open",
         "acquire:0",
+        "Begin:0",
         "handler",
+        "Commit:0",
         "release:0",
         "pool close",
     ]
@@ -159,13 +142,13 @@ async def test_repo_lifecycle():
 
 @pytest.mark.asyncio
 async def test_repo_call():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     @app.get("/h2")
     async def handler(repo=Depends(get_repo)):
         await repo.get_user(42)
-        repo.conn.log.append("handler")
+        repo.uow.conn.log.append("handler")
 
     try:
         await app._call_handler(handler, req)
@@ -177,8 +160,8 @@ async def test_repo_call():
         "acquire:0",
         "Begin:0",
         "repo: 42",
-        "Commit:0",
         "handler",
+        "Commit:0",
         "release:0",
         "pool close",
     ]
@@ -186,12 +169,12 @@ async def test_repo_call():
 
 @pytest.mark.asyncio
 async def test_repo_cleanup_on_exception():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     @app.get("/h3")
     async def handler(repo=Depends(get_repo)):
-        repo.conn.log.append("handler")
+        repo.uow.conn.log.append("handler")
         raise RuntimeError("Boom")
 
     with pytest.raises(RuntimeError):
@@ -200,7 +183,15 @@ async def test_repo_cleanup_on_exception():
         finally:
             await pool.close()
 
-    assert log == ["pool open", "acquire:0", "handler", "release:0", "pool close"]
+    assert log == [
+        "pool open",
+        "acquire:0",
+        "Begin:0",
+        "handler",
+        "Rollback:0",
+        "release:0",
+        "pool close",
+    ]
 
 
 @pytest.mark.asyncio
@@ -231,12 +222,12 @@ async def test_pool_acquire_release():
 
 @pytest.mark.asyncio
 async def test_pool_reuse_between_requests():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     @app.get("/reuse")
     def handler(repo=Depends(get_repo)):
-        repo.conn.log.append(f"handler:{repo.conn.ident}")
+        repo.uow.conn.log.append(f"handler:{repo.uow.conn.ident}")
         return "Ok"
 
     try:
@@ -249,10 +240,14 @@ async def test_pool_reuse_between_requests():
     assert log == [
         "pool open",
         "acquire:0",
+        "Begin:0",
         "handler:0",
+        "Commit:0",
         "release:0",
         "acquire:1",
+        "Begin:1",
         "handler:1",
+        "Commit:1",
         "release:1",
         "pool close",
     ]
@@ -260,7 +255,7 @@ async def test_pool_reuse_between_requests():
 
 @pytest.mark.asyncio
 async def test_pool_connection_context_manager():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     try:
@@ -275,7 +270,7 @@ async def test_pool_connection_context_manager():
 
 @pytest.mark.asyncio
 async def test_pool_connection_context_manager_on_exception():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     with pytest.raises(RuntimeError):
@@ -292,7 +287,7 @@ async def test_pool_connection_context_manager_on_exception():
 
 @pytest.mark.asyncio
 async def test_pool_lifespan():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
 
     async with lifespan(app, pool):
         async with pool.connection() as conn:
@@ -304,7 +299,7 @@ async def test_pool_lifespan():
 
 @pytest.mark.asyncio
 async def test_transaction_commit():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     try:
@@ -327,7 +322,7 @@ async def test_transaction_commit():
 
 @pytest.mark.asyncio
 async def test_transaction_rollback():
-    app, req, log, pool, get_db, get_repo = make_env()
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
     await pool.open()
 
     with pytest.raises(RuntimeError):
@@ -345,6 +340,85 @@ async def test_transaction_rollback():
         "Begin:0",
         "work",
         "Rollback:0",
+        "release:0",
+        "pool close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uow_rolls_back_on_handler_error():
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
+    await pool.open()
+
+    @app.get("/boom")
+    def handler(repo=Depends(get_repo)):
+        repo.uow.conn.log.append(f"handler:{repo.uow.conn.ident}")
+        raise ValueError("boom")
+
+    try:
+        with pytest.raises(ValueError):
+            await app._call_handler(handler, req)
+    finally:
+        await pool.close()
+
+    assert log == [
+        "pool open",
+        "acquire:0",
+        "Begin:0",
+        "handler:0",
+        "Rollback:0",
+        "release:0",
+        "pool close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repo_uses_framework_transaction():
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
+    await pool.open()
+
+    @app.get("/users")
+    async def handler(repo=Depends(get_repo)):
+        return await repo.get_user(42)
+
+    try:
+        result = await app._call_handler(handler, req)
+    finally:
+        await pool.close()
+
+    assert result == {"id": 42}
+    assert log == [
+        "pool open",
+        "acquire:0",
+        "Begin:0",
+        "repo: 42",
+        "Commit:0",
+        "release:0",
+        "pool close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uow_exposes_users_repo():
+    app, req, log, pool, get_db, get_uow, get_repo = make_env()
+    await pool.open()
+
+    @app.get("/users")
+    async def handler(uow=Depends(get_uow)):
+        return await uow.users.get_user(42)
+
+    try:
+        result = await app._call_handler(handler, req)
+    finally:
+        await pool.close()
+
+    assert result == {"id": 42}
+    assert log == [
+        "pool open",
+        "acquire:0",
+        "Begin:0",
+        "repo: 42",
+        "Commit:0",
         "release:0",
         "pool close",
     ]
